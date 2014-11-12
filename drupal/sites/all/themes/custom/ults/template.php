@@ -17,12 +17,12 @@
  *   The name of the template being rendered ("maintenance_page" in this case.)
  */
 /* -- Delete this line if you want to use this function
-function STARTERKIT_preprocess_maintenance_page(&$variables, $hook) {
+function ults_preprocess_maintenance_page(&$variables, $hook) {
   // When a variable is manipulated or added in preprocess_html or
   // preprocess_page, that same work is probably needed for the maintenance page
   // as well, so we can just re-use those functions to do that work here.
-  STARTERKIT_preprocess_html($variables, $hook);
-  STARTERKIT_preprocess_page($variables, $hook);
+  ults_preprocess_html($variables, $hook);
+  ults_preprocess_page($variables, $hook);
 }
 // */
 
