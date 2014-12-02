@@ -3,6 +3,13 @@ source "https://rubygems.org"
 
 # gem "rails"
 
+# Versions needed for Zen 7-x-5.5 as of 12/1/2014
+# sass 3.2.19
+# compass 0.12..7
+# sass-globbing allows you to import many sass or scss files
+#   in a single import statement
+
+
 gem 'sass', "= 3.2.19"
 gem 'sass-globbing', ">=1.1.0"
 gem 'compass', "0.12.7"
