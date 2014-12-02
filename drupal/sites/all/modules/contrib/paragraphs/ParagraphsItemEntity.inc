@@ -1,4 +1,8 @@
 <?php
+/**
+ * @file
+ * Entity implementation for the paragraphs entity.
+ */
 
 /**
  * Class for paragraphs_item entities.
@@ -93,8 +97,13 @@ class ParagraphsItemEntity extends Entity {
       // Ok, we have the field name property, we can proceed and check the field's type
       $field_info = $this->fieldInfo();
 
+      // Check if we have field info, if not, our field is deleted.
+      if (!$field_info) {
+        return FALSE;
+      }
+
       // We only allow paragraphs type field for this entity.
-      if (!$field_info || $field_info['type'] != 'paragraphs') {
+      if ($field_info['type'] != 'paragraphs') {
         throw new Exception("Invalid field name given: {$this->field_name} is not a paragraphs field.");
       }
     }
@@ -203,6 +212,12 @@ class ParagraphsItemEntity extends Entity {
     }
   }
 
+  /**
+   * Function to force change the host entity of this paragraph item.
+   *
+   * @param $entity
+   *   The entity to force the host to.
+   */
   public function forceHostEntity($entity) {
     $this->hostEntity = $entity;
   }
@@ -255,6 +270,12 @@ class ParagraphsItemEntity extends Entity {
     }
   }
 
+  /**
+   * Fetches details of the host and saves it in the entity.
+   *
+   * @return bool
+   *   Whether the fetching was successful.
+   */
   protected function fetchHostDetails() {
     if (!isset($this->hostEntityId)) {
       if ($this->item_id) {
@@ -357,7 +378,7 @@ class ParagraphsItemEntity extends Entity {
 
     // Only save directly if we are told to skip saving the host entity. Else,
     // we always save via the host as saving the host might trigger saving
-    // paragraphs items anyway (e.g. if a new revision is created).
+    // paragraphs items anyway (for example, if a new revision is created).
     if ($skip_host_save) {
       return entity_get_controller($this->entityType)->save($this);
     }
@@ -413,23 +434,19 @@ class ParagraphsItemEntity extends Entity {
    * delete the collection item from archived revisions too. Instead, we delete
    * the current default revision and archive the paragraph.
    *
-   * If no revisions are left or the host is not revisionable, the whole item
-   * is deleted.
    */
   public function deleteRevision($skip_host_update = FALSE) {
     if (!$this->revision_id) {
       return;
     }
-    $info = entity_get_info($this->hostEntityType());
-    if (empty($info['entity keys']['revision']) || !$this->hostEntity()) {
-      return $this->delete();
-    }
+
     if (!$skip_host_update) {
       // Just remove the item from the host, which cares about deleting the
       // item (depending on whether the update creates a new revision).
       $this->deleteHostEntityReference();
     }
-    elseif (!$this->isDefaultRevision()) {
+
+    if (!$this->isDefaultRevision()) {
       entity_revision_delete('paragraphs_item', $this->revision_id);
     }
     // If deleting the default revision, take care!
@@ -459,7 +476,7 @@ class ParagraphsItemEntity extends Entity {
   /**
    * Export the paragraphs item.
    *
-   * Since paragraphs entities are not directly exportable (i.e., do not
+   * Since paragraphs entities are not directly exportable (that is, do not
    * have 'exportable' set to TRUE in hook_entity_info()) and since Features
    * calls this method when exporting the paragraphs as a field attached
    * to another entity, we return the export in the format expected by
@@ -486,13 +503,13 @@ class ParagraphsItemEntity extends Entity {
     $field_instances = field_info_instances($this->entityType, $this->bundle);
     foreach ($field_instances as $field_name => $field) {
       $info = field_info_field($field_name);
-      if ($info['type'] == 'image' && $image_field = &$this->{$field_name}) {
+      if (is_array($info) && $info['type'] == 'image' && $image_field = &$this->{$field_name}) {
         // Add the URI to the field on the entity for display.
         if (isset($image_field[$langcode])) {
           foreach ($image_field[$langcode] as &$field_to_be_updated) {
             if (!isset($field_to_be_updated['uri'])) {
               $image = file_load($field_to_be_updated['fid']);
-              if($image) {
+              if ($image) {
                 $field_to_be_updated['uri'] = $image->uri;
               }
             }

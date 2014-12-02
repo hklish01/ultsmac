@@ -1,8 +1,30 @@
 <?php
+/**
+ * @file
+ * Paragraphs hooks and common functions.
+ * Paragraphs allows you to embed multiple entity bundles in field.
+ */
 
 define('PARAGRAPHS_DEFAULT_TITLE', 'Paragraph');
 define('PARAGRAPHS_DEFAULT_TITLE_MULTIPLE', 'Paragraphs');
 define('PARAGRAPHS_DEFAULT_EDIT_MODE', 'open');
+define('PARAGRAPHS_DEFAULT_ADD_MODE', 'select');
+
+/**
+ * Modules should return this value from hook_paragraphs_item_access() to allow access to a paragraphs item.
+ */
+define('PARAGRAPHS_ITEM_ACCESS_ALLOW', 'allow');
+
+/**
+ * Modules should return this value from hook_paragraphs_item_access() to deny access to a paragraphs item.
+ */
+define('PARAGRAPHS_ITEM_ACCESS_DENY', 'deny');
+
+/**
+ * Modules should return this value from hook_paragraphs_item_access() to not affect paragraphs item access.
+ */
+define('PARAGRAPHS_ITEM_ACCESS_IGNORE', NULL);
+
 
 // Separate some Field API parts in different files.
 require_once dirname(__FILE__) . '/paragraphs.field_formatter.inc';
@@ -79,12 +101,16 @@ function paragraphs_entity_info() {
         'label' => t('Full content'),
         'custom settings' => FALSE,
       ),
+      'paragraphs_editor_preview' => array(
+        'label' => t('Paragraphs Editor Preview'),
+        'custom settings' => TRUE,
+      ),
     ),
     'bundle keys' => array(
       'bundle' => 'bundle',
     ),
     'access callback' => 'paragraphs_item_access',
-    'metadata controller class' => 'ParagraphsItemMetadataController'
+    'metadata controller class' => 'ParagraphsItemMetadataController',
   );
 
   $bundles = paragraphs_bundle_load();
@@ -104,16 +130,77 @@ function paragraphs_entity_info() {
     );
   }
 
+  if (module_exists('entitycache')) {
+    $return['paragraphs_item']['field cache'] = FALSE;
+    $return['paragraphs_item']['entity cache'] = TRUE;
+  }
+
   return $return;
 }
 
-function paragraphs_item_access() {
-  // TODO: might want to do some checking here? Might not be needed as the host should do this.
-  return TRUE;
+/**
+ * Access check for paragraphs.
+ *
+ * Most of the time the access callback is on the host entity.
+ * In some cases you want specific access checks on paragraphs.
+ * You can do this by implementing hook_paragraphs_item_access().
+ *
+ * @return bool
+ *   Whether the user has access to a paragraphs item.
+ */
+function paragraphs_item_access($op, $entity, $account, $entity_type) {
+  // If no user object is supplied, the access check is for the current user.
+  if (empty($account)) {
+    $account = $GLOBALS['user'];
+  }
+  $permissions = &drupal_static(__FUNCTION__, array());
+
+  // If the $op was not one of the supported ones, we return access denied.
+  if (!in_array($op, array('view', 'update', 'delete', 'create'), TRUE)) {
+    return FALSE;
+  }
+
+  // Entity variable should be the bundle when op is create.
+  if ($op == 'create' && !is_string($entity)) {
+    return FALSE;
+  }
+
+  // Cid is the bundle name when op is create.
+  if ($op == 'create') {
+    $cid = $entity;
+  }
+  else {
+    $cid = $entity->item_id . '_' . $entity->revision_id;
+  }
+
+  // If we've already checked access for this bundle, user and op, return from
+  // cache.
+  if (isset($permissions[$account->uid][$cid][$op])) {
+    return $permissions[$account->uid][$cid][$op];
+  }
+
+  // We grant access to the paragraph item if both of the following conditions are met:
+  // - No modules say to deny access.
+  // - At least one module says to grant access.
+  // If no module specified either allow or deny, we always allow.
+  $access = module_invoke_all('paragraphs_item_access', $entity, $op, $account);
+  if (in_array(PARAGRAPHS_ITEM_ACCESS_DENY, $access, TRUE)) {
+    $permissions[$account->uid][$cid][$op] = TRUE;
+    return FALSE;
+  }
+  elseif (in_array(PARAGRAPHS_ITEM_ACCESS_ALLOW, $access, TRUE)) {
+    $permissions[$account->uid][$cid][$op] = TRUE;
+    return TRUE;
+  }
+
+  // We always have access unless somebody implements the hook.
+  $permissions[$account->uid][$cid][$op] = TRUE;
+
+  return $permissions[$account->uid][$cid][$op];
 }
 
 /**
- * Implements hook_permission
+ * Implements hook_permission().
  */
 function paragraphs_permission() {
   $perms = array(
@@ -127,7 +214,7 @@ function paragraphs_permission() {
 
 
 /**
- * Implements hook_menu
+ * Implements hook_menu().
  */
 function paragraphs_menu() {
   $items = array();
@@ -229,25 +316,82 @@ function paragraphs_field_info() {
 }
 
 /**
+ * Implements hook_form_field_ui_field_edit_form_alter().
+ */
+function paragraphs_form_field_ui_field_edit_form_alter(&$form, $form_state) {
+  if ($form['#field']['type'] == 'paragraphs') {
+    $form['#theme'] = array('paragraphs_bundle_settings_form');
+    array_unshift($form['#submit'], 'paragraphs_bundle_settings_form_submit');
+  }
+}
+
+function paragraphs_bundle_settings_form_submit($form, &$form_state) {
+  $bundle_settings = array();
+  if (isset($form_state['values']['instance']['settings']['allowed_bundles_table'])) {
+    $bundle_settings_table = $form_state['values']['instance']['settings']['allowed_bundles_table'];
+    uasort($bundle_settings_table, 'drupal_sort_weight');
+    foreach ($bundle_settings_table as $machine_name => $value) {
+      $bundle_settings[$machine_name] = (($value['enabled'] === 1) ? $machine_name : 0);
+    }
+  }
+  $form_state['values']['instance']['settings']['allowed_bundles'] = $bundle_settings;
+  unset($form_state['values']['instance']['settings']['allowed_bundles_table']);
+}
+
+/**
  * Implements hook_field_instance_settings_form().
  */
 function paragraphs_field_instance_settings_form($field, $instance) {
 
   $settings = $instance['settings'];
-
   $bundles = array();
   $_bundles = paragraphs_bundle_load();
-  foreach($_bundles as $machine_name => $bundle) {
+  foreach ($_bundles as $machine_name => $bundle) {
     $bundles[$machine_name] = $bundle->name;
   }
 
-  $element['allowed_bundles'] = array(
-    '#type' => 'checkboxes',
-    '#title' => t('Allowed Paragraph bundles'),
-    '#options' => $bundles,
-    '#default_value' => isset($settings['allowed_bundles']) ? $settings['allowed_bundles'] : array(),
-    '#element_validate' => array('paragraphs_field_instance_settings_form_empty_bundle_check'),
+  $weights = array();
+  $weight = 0;
+  if (isset($settings['allowed_bundles'])) {
+    foreach ($settings['allowed_bundles'] as $machine_name => $bundle) {
+      $weights[$machine_name] = $weight;
+      $weight++;
+    }
+  }
+  $max_weight = $weight;
+
+  $element['allowed_bundles_table'] = array(
+    '#tree' => TRUE,
+    '#prefix' => '<label>' . t('Allowed Paragraph bundles') . '</label>',
+    '#suffix' => '<div class="description">' . t('If no bundle is selected, all the bundles will be available.') . '</div>',
   );
+
+  $weight = 1;
+  foreach ($_bundles as $machine_name => $bundle) {
+
+    $enabled = FALSE;
+    if (isset($settings['allowed_bundles'][$machine_name]) && $settings['allowed_bundles'][$machine_name] === $machine_name) {
+      $enabled = TRUE;
+    }
+
+    $element['allowed_bundles_table'][$machine_name] = array(
+      'enabled' => array(
+        '#type' => 'checkbox',
+        '#title' => check_plain($bundle->name),
+        '#title_display' => 'after',
+        '#default_value' => $enabled,
+      ),
+      'weight' => array(
+        '#type' => 'weight',
+        '#title' => t('Weight'),
+        '#default_value' => (isset($weights[$machine_name]) ? $weights[$machine_name] : $weight + $max_weight),
+        '#delta' => 10,
+        '#title_display' => 'invisible',
+      ),
+    );
+    $element['allowed_bundles_table'][$machine_name]['#weight'] = $element['allowed_bundles_table'][$machine_name]['weight']['#default_value'];
+    $weight++;
+  }
 
   $element['title'] = array(
     '#type' => 'textfield',
@@ -259,8 +403,8 @@ function paragraphs_field_instance_settings_form($field, $instance) {
 
   $element['title_multiple'] = array(
     '#type' => 'textfield',
-    '#title' => t('Item Title multiple'),
-    '#description' => t('Title in its multiple form.'),
+    '#title' => t('Plural Item Title'),
+    '#description' => t('Title in its plural form.'),
     '#default_value' => isset($settings['title_multiple']) ? $settings['title_multiple'] : PARAGRAPHS_DEFAULT_TITLE_MULTIPLE,
     '#required' => TRUE,
   );
@@ -268,23 +412,34 @@ function paragraphs_field_instance_settings_form($field, $instance) {
   $element['default_edit_mode'] = array(
     '#type' => 'select',
     '#title' => t('Default edit mode'),
-    '#description' => t('The default edit mode the paragraph item is in.'),
+    '#description' => t('The default edit mode the paragraph item is in. Preview will render the paragraph in the preview view mode.'),
     '#options' => array(
       'open' => t('Open'),
       'closed' => t('Closed'),
+      'preview' => t('Preview'),
     ),
     '#default_value' => isset($settings['default_edit_mode']) ? $settings['default_edit_mode'] : PARAGRAPHS_DEFAULT_EDIT_MODE,
     '#required' => TRUE,
   );
 
+  $element['add_mode'] = array(
+    '#type' => 'select',
+    '#title' => t('Add mode'),
+    '#description' => t('The way to add new paragraphs.'),
+    '#options' => array(
+      'select' => t('Select List'),
+      'button' => t('Buttons'),
+    ),
+    '#default_value' => isset($settings['add_mode']) ? $settings['add_mode'] : PARAGRAPHS_DEFAULT_ADD_MODE,
+    '#required' => TRUE,
+  );
 
-  if(!count($bundles)) {
+  if (!count($bundles)) {
     $element['allowed_bundles_explain'] = array(
       '#type' => 'markup',
       '#markup' => t('You did not add any paragraph bundles yet, click !here to add one.', array('!here' => l(t('here'), 'admin/structure/paragraphs/add', array('query' => drupal_get_destination()))))
     );
   }
-
 
   $element['fieldset'] = array(
     '#type' => 'fieldset',
@@ -294,7 +449,7 @@ function paragraphs_field_instance_settings_form($field, $instance) {
     // the value below is writing to $instance in the right location.
     '#parents' => array('instance'),
   );
-  // Be sure to set the default value to NULL, e.g. to repair old fields
+  // Be sure to set the default value to NULL, for example to repair old fields
   // that still have one.
   $element['fieldset']['default_value'] = array(
     '#type' => 'value',
@@ -308,12 +463,82 @@ function paragraphs_field_instance_settings_form($field, $instance) {
   return $element;
 }
 
-function paragraphs_field_instance_settings_form_empty_bundle_check($element, &$form_state, $form) {
-  if (!count($element['#value'])) {
-    form_error($element, t('Select at least one bundle.'));
-  }
-}
+function theme_paragraphs_bundle_settings_form($variables) {
+  $form = $variables['form'];
 
+  // Initialize the variable which will store our table rows.
+  $rows = array();
+
+  uasort($form['instance']['settings']['allowed_bundles_table'], 'element_sort');
+
+  // Iterate over each element in our $form['example_items'] array.
+  foreach (element_children($form['instance']['settings']['allowed_bundles_table']) as $id) {
+
+    // Before we add our 'weight' column to the row, we need to give the
+    // element a custom class so that it can be identified in the
+    // drupal_add_tabledrag call.
+    //
+    // This could also have been done during the form declaration by adding
+    // '#attributes' => array('class' => 'example-item-weight'),
+    // directy to the 'weight' element in tabledrag_example_simple_form().
+    $form['instance']['settings']['allowed_bundles_table'][$id]['weight']['#attributes']['class'] = array('paragraphs-bundle-item-weight');
+
+    // We are now ready to add each element of our $form data to the $rows
+    // array, so that they end up as individual table cells when rendered
+    // in the final table.  We run each element through the drupal_render()
+    // function to generate the final html markup for that element.
+    $rows[] = array(
+      'data' => array(
+
+        // Add our 'enabled' column.
+        drupal_render($form['instance']['settings']['allowed_bundles_table'][$id]['enabled']),
+
+        // Add our 'weight' column.
+        drupal_render($form['instance']['settings']['allowed_bundles_table'][$id]['weight']),
+      ),
+
+      // To support the tabledrag behaviour, we need to assign each row of the
+      // table a class attribute of 'draggable'. This will add the 'draggable'
+      // class to the <tr> element for that row when the final table is
+      // rendered.
+      'class' => array('draggable'),
+    );
+  }
+
+  // We now define the table header values.  Ensure that the 'header' count
+  // matches the final column count for your table.
+  $header = array(t('Bundle'), t('Weight'));
+
+  // We also need to pass the drupal_add_tabledrag() function an id which will
+  // be used to identify the <table> element containing our tabledrag form.
+  // Because an element's 'id' should be unique on a page, make sure the value
+  // you select is NOT the same as the form ID used in your form declaration.
+  $table_id = drupal_html_id('paragraphs-bundle-table');
+
+  // We can render our tabledrag table for output.
+  $output = theme('table', array(
+    'header' => $header,
+    'rows' => $rows,
+    'attributes' => array('id' => $table_id),
+  ));
+
+  $form['instance']['settings']['allowed_bundles_table']['#markup'] = $output;
+
+  // And then render any remaining form elements (such as our submit button).
+  $output = drupal_render_children($form);
+
+  // We now call the drupal_add_tabledrag() function in order to add the
+  // tabledrag.js goodness onto our page.
+  //
+  // For a basic sortable table, we need to pass it:
+  // - the $table_id of our <table> element,
+  // - the $action to be performed on our form items ('order'),
+  // - a string describing where $action should be applied ('siblings'),
+  // - and the class of the element containing our 'weight' element.
+  drupal_add_tabledrag($table_id, 'order', 'sibling', 'paragraphs-bundle-item-weight');
+
+  return $output;
+}
 
 /**
  * Implements hook_field_settings_form().
@@ -356,9 +581,10 @@ function paragraphs_field_presave($host_entity_type, $host_entity, $field, $inst
             $entity->archived = FALSE;
           }
         }
-        if(isset($entity->removed) && $entity->removed) {
+        if (isset($entity->removed) && $entity->removed) {
           unset($items[$key]);
-        } else {
+        }
+        else {
           $entity->save(TRUE);
 
           $item = array(
@@ -422,21 +648,27 @@ function paragraphs_field_delete($entity_type, $entity, $field, $instance, $lang
     if ($ids = paragraphs_field_item_to_ids($items)) {
       // We filter out entities that are still being referenced by other
       // host-entities. This should never be the case, but it might happened e.g.
-      // when modules cloned a node without knowing about field-collection.
+      // when modules cloned a node without knowing about paragraphs.
       $entity_info = entity_get_info($entity_type);
       $entity_id_name = $entity_info['entity keys']['id'];
       $field_column = key($field['columns']);
 
-      foreach ($ids as $id_key => $id) {
-        $query = new EntityFieldQuery();
-        $entities = $query
-          ->fieldCondition($field['field_name'], $field_column, $id)
-          ->execute();
-        unset($entities[$entity_type][$entity->$entity_id_name]);
+      // Extra check to make sure our field exists.
+      if (is_scalar($field)) {
+        $field_definition = field_info_field($field['field_name']);
+        if (!empty($field_definition)) {
+          foreach ($ids as $id_key => $id) {
+            $query = new EntityFieldQuery();
+            $entities = $query
+              ->fieldCondition($field['field_name'], $field_column, $id)
+              ->execute();
+            unset($entities[$entity_type][$entity->$entity_id_name]);
 
-        if (!empty($entities[$entity_type])) {
-          // Filter this $id out.
-          unset($ids[$id_key]);
+            if (!empty($entities[$entity_type])) {
+              // Filter this $id out.
+              unset($ids[$id_key]);
+            }
+          }
         }
       }
 
@@ -502,7 +734,7 @@ function paragraphs_item_is_empty(ParagraphsItemEntity $item) {
 
     foreach ($languages as $langcode) {
       if (!empty($item->{$field_name}[$langcode])) {
-        // If at least one collection-field is not empty; the
+        // If at least one paragraph is not empty; the
         // paragraph item is not empty.
         foreach ($item->{$field_name}[$langcode] as $field_item) {
           if (!module_invoke($field['module'], 'field_is_empty', $field_item, $field)) {
@@ -518,8 +750,17 @@ function paragraphs_item_is_empty(ParagraphsItemEntity $item) {
   return $is_empty;
 }
 
-/*
+/**
  * Load a specific bundle or a list of bundles
+ *
+ * @param string|null $name
+ *   The machine name or list of bundles to load when null.
+ *
+ * @param bool $rebuild
+ *   Whether to use cache or not.
+ *
+ * @return array|stdClass|bool
+ *   The bundle, a list of bundles, or FALSE when not found.
  */
 function paragraphs_bundle_load($name = NULL, $rebuild = FALSE) {
   $cid = 'paragraphs_bundles';
@@ -529,11 +770,13 @@ function paragraphs_bundle_load($name = NULL, $rebuild = FALSE) {
   $_bundles = &drupal_static($cid);
   if (isset($_bundles) && !$rebuild) {
     $bundles = $_bundles;
-  } else {
+  }
+  else {
     $_bundles = cache_get($cid);
     if ($_bundles && !$rebuild) {
       $bundles = $_bundles->data;
-    } else {
+    }
+    else {
       $query = db_select('paragraphs_bundle', 'pb')
         ->fields('pb')
         ->orderBy('pb.bundle', 'ASC');
@@ -545,17 +788,29 @@ function paragraphs_bundle_load($name = NULL, $rebuild = FALSE) {
     $_bundles = $bundles;
   }
 
-  if($name) {
+  if ($name) {
     $name = strtr($name, array('-' => '_'));
-    if(isset($bundles[$name])) {
+    if (isset($bundles[$name])) {
       return $bundles[$name];
     }
     return FALSE;
-  } else {
+  }
+  else {
     return $bundles;
   }
 }
 
+/**
+ * Function to create or update an paragraphs bundle.
+ *
+ * @param stdClass $bundle
+ *   The object of the bundle to create/update.
+ *
+ * @return int
+ *   SAVED_UPDATED when updated, SAVED_NEW when created.
+ *
+ * @throws Exception
+ */
 function paragraphs_bundle_save($bundle) {
   $is_existing = (bool) db_query_range('SELECT 1 FROM {paragraphs_bundle} WHERE bundle = :bundle', 0, 1, array(':bundle' => $bundle->bundle))->fetchField();
 
@@ -586,9 +841,15 @@ function paragraphs_bundle_save($bundle) {
   return $status;
 }
 
+/**
+ * Function to delete a bundle.
+ *
+ * @param $bundle_machine_name
+ *   Machine name of the bundle to delete.
+ */
 function paragraphs_bundle_delete($bundle_machine_name) {
   $bundle = paragraphs_bundle_load($bundle_machine_name);
-  if($bundle) {
+  if ($bundle) {
     db_delete('paragraphs_bundle')
       ->condition('bundle', $bundle->bundle)
       ->execute();
@@ -706,12 +967,14 @@ function theme_paragraphs_field_multiple_value_form($variables) {
   $output = '';
   $instance = $element['#instance'];
 
-  if(!isset($instance['settings']['title'])) {
+  if (!isset($instance['settings']['title'])) {
     $instance['settings']['title'] = PARAGRAPHS_DEFAULT_TITLE;
   }
-  if(!isset($instance['settings']['title_multiple'])) {
+  if (!isset($instance['settings']['title_multiple'])) {
     $instance['settings']['title_multiple'] = PARAGRAPHS_DEFAULT_TITLE_MULTIPLE;
   }
+
+  $add_mode = (isset($instance['settings']['add_mode']) ? $instance['settings']['add_mode'] : PARAGRAPHS_DEFAULT_ADD_MODE);
 
   $table_id = drupal_html_id($element['#field_name'] . '_values');
   $order_class = $element['#field_name'] . '-delta-order';
@@ -734,7 +997,7 @@ function theme_paragraphs_field_multiple_value_form($variables) {
     if ($key === 'add_more') {
       $add_more_button = &$element[$key];
     }
-    else if ($key === 'add_more_type') {
+    elseif ($key === 'add_more_type') {
       $add_more_button_type = &$element[$key];
     }
     else {
@@ -759,11 +1022,16 @@ function theme_paragraphs_field_multiple_value_form($variables) {
   }
 
   $output = '<div class="form-item">';
-  if(count($items)) {
+  if (count($items)) {
     $output .= theme('table', array('header' => $header, 'rows' => $rows, 'attributes' => array('id' => $table_id, 'class' => array('field-multiple-table'))));
-  } else {
+  }
+  else {
+    $add_text = 'No !title_multiple added yet. Select a !title type and press the button below to add one.';
+    if ($add_mode == 'button') {
+      $add_text = 'No !title_multiple added yet. Select a !title type and press a button below to add one.';
+    }
     $output .= '<label>' . t('!title !required', array('!title' => $element['#title'], '!required' => $required)) . "</label>";
-    $output .= '<p><em>' . t('No !title_multiple added yet. Select a !title type and press the button below to add one.', array('!title_multiple' => t($instance['settings']['title_multiple']), '!title' => t($instance['settings']['title']))) . '</em></p>';
+    $output .= '<p><em>' . t($add_text, array('!title_multiple' => t($instance['settings']['title_multiple']), '!title' => t($instance['settings']['title']))) . '</em></p>';
   }
   $output .= $element['#description'] ? '<div class="description">' . $element['#description'] . '</div>' : '';
   $output .= '<div class="clearfix">' . drupal_render($add_more_button_type) . drupal_render($add_more_button) . '</div>';
@@ -781,6 +1049,9 @@ function paragraphs_theme() {
   return array(
     'paragraphs_field_multiple_value_form' => array(
       'render element' => 'element',
+    ),
+    'paragraphs_bundle_settings_form' => array(
+      'render element' => 'form',
     ),
     'paragraphs_items' => array(
       'render element' => 'element',
